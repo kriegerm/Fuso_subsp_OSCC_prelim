@@ -1,0 +1,690 @@
+---
+title: "K99_resubmission_RNAseq"
+author: "Madeline Krieger"
+date: '2025_06'
+output:
+  pdf_document:
+    toc: yes
+    fig_width: 4
+    
+  html_document:
+    toc: yes
+    toc_float: yes
+    fig_width: 4
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+## Starting Information
+
+# Resources for understanding this output
+Some great resources to check for information on any of the included plots are listed below:
+<http://bioconductor.org/packages/devel/bioc/vignettes/DESeq2/inst/doc/DESeq2.html#variance-stabilizing-transformation>
+<https://www.bioconductor.org/help/course-materials/2015/CSAMA2015/lab/rnaseqCSAMA.html>
+<http://bioconductor.org/packages/devel/bioc/vignettes/DESeq2/inst/doc/DESeq2.html>
+
+# Note about Log2FC Values
+The Log2FC is calculated with the control as the reference value. So if there is a positive Log2FC value, that means that there are MORE counts in the control sample.
+
+# How to run this code:
+In the same folder that your R markdown file is located in, you need two other files:
+
+**raw_counts.txt** should be a file of all the raw counts from gene expression analysis. Here is an example:
+```{r}
+#	BLBGC-5	BLBGC-4	BLBGC-3	BLBGC-2	BLBGC-1	but-5	but-4	but-3
+#D3841_RS08990	261	257	293	270	249	245	181	192
+#D3841_RS08995	4166	4348	4556	4132	4089	3968	1777	1729
+#D3841_RS09000	93	111	63	97	88	70	65	60
+#D3841_RS09005	38762	43507	44741	42168	44999	9587	11524	12146
+#D3841_RS09010	63913	68432	65276	65303	67115	13810	15555	16756
+```
+
+
+**conditions.txt** should be a list of the conditions/groups your samples are in. The sample names need to be in the same order as your raw_counts.txt headers. Here is an example:
+
+Sample_ID	condition	Rep
+BLBGC-5	BLBGC	1
+BLBGC-4	BLBGC	2
+BLBGC-3	BLBGC	3
+BLBGC-2	BLBGC	4
+BLBGC-1	BLBGC	5
+but-5	but	1
+but-4	but	2
+but-3	but	3
+but-2	but	4
+but-1	but	5
+
+
+```{r setup-chunk, include=FALSE}
+knitr::opts_chunk$set(dev = "png",
+                      dpi = 300,
+                      echo = TRUE,
+                      cache = TRUE)
+```
+
+
+# Loading Libraries
+```{r load_libraries, warning = FALSE}
+library("DESeq2")
+library("tidyverse")
+library('EnhancedVolcano')
+library('pheatmap')
+library('RColorBrewer')
+library("genefilter")
+library("PoiClaClu")
+library(here)
+library("tidyverse")
+
+library(enrichplot)
+library(cowplot)
+library(tibble)
+library(dplyr)
+
+library(DOSE)
+library(clusterProfiler)
+library(GSEABase)
+library(VennDiagram)
+here::here("RNAseq.Rmd")
+```
+
+# 1.0 All Samples, All Groups
+
+**Loading in data**
+```{r load_data}
+countData = read.csv("counts_matrix.csv", header=TRUE, row.names = 1, check.names=FALSE, sep="," )
+colData = read.table(file= "conditions.txt", fill=TRUE, header=TRUE, check.names=FALSE, row.names=1 )
+
+
+#Remove CNTRL_2 
+colData <- colData[rownames(colData) != "CNTRL_2", ]
+
+
+#Make sure the rows of ColData are in the same order as the columns of countData
+colData <- colData[colnames(countData), ]
+
+#Remove first 4 rows, which are not gene counts
+countData <- countData[-c(1:4), ]
+
+
+print(colData)
+print(countData)
+```
+
+## Run DESeq2
+
+**Define some variables for future plots**
+```{r def_variables_all}
+groups = c("Control", "Fnn_ATCC","Fna_ATCC", "Fna_WT", "Fnp_WT")
+colors = c( "gray45", "#FF7256","#90D6F4", "dodgerblue", "darkgoldenrod1" )
+```
+
+**Run DESeq2**
+```{r run_DESeq_all}
+dds <- DESeqDataSetFromMatrix(countData = countData, colData = colData, design = ~condition)
+dds$condition <- relevel(dds$condition, ref = "Control")
+
+dds <- DESeq(dds)
+```
+
+**Transform data**
+```{r data_transformations_all}
+rld <- rlog(dds)
+vsd <- vst(dds)
+```
+
+
+## Heat map of sample distances
+```{r heatmap_all,fig.height=4, fig.width=5,  dpi = 500}
+
+#Preparing Annotation Dataframe
+df <- as.data.frame(colData(rld))
+df <- dplyr::select(df, -Rep, -sizeFactor, -origin)
+rownames(df) <- colnames(rld)
+names(colors) = groups
+ann_colors = list(condition = colors)
+
+#Preparing Sample Distnace Matrix
+sampleDists <- dist( t( assay(rld) ) )
+sampleDistMatrix <- as.matrix(sampleDists)
+colnames(sampleDistMatrix) <- NULL
+
+#Create the Heatmap with Pheatmap
+heatmap <- pheatmap(sampleDistMatrix,
+                    clustering_distance_rows=sampleDists,
+                    clustering_distance_cols=sampleDists,
+                    annotation_row = df,          
+                    annotation_colors = ann_colors, 
+                    fontisze = 4)
+
+#ggsave(filename="all-samples_heatmap.png", plot=heatmap, device="png", width=6, height=6, units=c("in"))
+```
+
+## PCA plot
+```{r PCA_all, fig.height=5, fig.width=6, dpi = 500}
+
+pca <- prcomp(t(assay(vsd)), center = TRUE, scale. = FALSE)
+pc_scores <- as.data.frame(pca$x)  # each column is a PC, rows = samples
+pc_scores$sample <- rownames(pc_scores)
+pc_scores <- cbind(pc_scores, as.data.frame(colData(dds)[rownames(pc_scores), ]))
+
+
+percentVar <- (pca$sdev)^2 / sum(pca$sdev^2) * 100
+names(percentVar) <- colnames(pca$x)
+
+ggplot(pc_scores, aes(x = PC1, y = PC2, color = condition)) +
+  geom_point(size = 3) +
+  theme_bw() +
+  scale_colour_manual(values=colors)+
+  labs(x = paste0("PC1 (", round(percentVar["PC1"], 1), "%)"),
+       y = paste0("PC2 (", round(percentVar["PC2"], 1), "%)"),
+       title = "PCA: PC1 vs PC2")
+
+ggplot(pc_scores, aes(x = PC2, y = PC3, color = condition)) +
+  geom_point(size = 3) +
+  theme_bw() +
+  scale_colour_manual(values=colors)+
+  labs(x = paste0("PC2 (", round(percentVar["PC2"], 1), "%)"),
+       y = paste0("PC3 (", round(percentVar["PC3"], 1), "%)"),
+       title = "PCA: PC2 vs PC3")
+
+ggplot(pc_scores, aes(x = PC3, y = PC4, color = condition)) +
+  geom_point(size = 3) +
+  theme_bw() +
+  scale_colour_manual(values=colors)+
+  labs(x = paste0("PC3 (", round(percentVar["PC3"], 1), "%)"),
+       y = paste0("PC4 (", round(percentVar["PC4"], 1), "%)"),
+       title = "PCA: PC3 vs PC4")
+
+#ggsave(filename="all-samples_PCA_rld.png", device ="png", height = 4, width = 5, units = c("in"), dpi = 500)
+```
+
+## PCA plot by coverage
+```{r}
+fragments <- colSums(counts(dds))
+pc_scores$fragments <- fragments[rownames(pc_scores)]
+
+ggplot(pc_scores, aes(x = PC1, y = fragments)) +
+  geom_point(size = 3, aes(color = condition)) +
+  geom_smooth(method = "lm", se = FALSE, linetype = "dashed") +
+  theme_bw() +
+  scale_colour_manual(values=colors)+
+  labs(title = "Fragments vs PC1",
+       x = paste0("PC1: ", percentVar[1], "% variance"),
+       y = "Number of fragments")
+```
+
+
+## MDS plot
+```{r MDS_all, fig.height=5, fig.width=6,  dpi =500}
+mds <- data.frame(cmdscale(sampleDistMatrix))
+mds <- cbind(mds, as.data.frame(colData(rld)))
+
+qplot(X1,X2,color=condition, data=mds)+
+  geom_point(size=2, alpha=1) +
+  scale_colour_manual(values=colors)+
+  theme_bw()+
+  ggtitle("All Samples MDS Plot")+
+  theme(plot.title = element_text( face ="bold", size=14, hjust=0.5))
+```
+
+
+
+
+## Running DESeq2
+Make sure that the control is the first level in the factor, 
+so that the default log2 fold changes are calculated as treated over untreated.
+```{r}
+dds$condition <- relevel(dds$condition, "Control")
+```
+
+
+```{r }
+res <- results(dds)
+results_tab <- merge(as.data.frame(res), as.data.frame(counts(dds, normalized=F)), by="row.names", sort=FALSE)
+colnames(results_tab)[1] ="Gene"
+write.csv(results_tab, row.names = FALSE, file=paste0("allconditions_DeSeq2_DEGS.csv"))
+```
+
+**Sumarizing the results**
+```{r }
+summary(res)
+```
+
+**Finding significant genes**
+```{r }
+resSig <- subset(res, padj < 0.05)
+head(resSig[ order( resSig$log2FoldChange ), ])
+```
+
+## Boxplot of Outliers
+You can make a boxplot of the Cook’s distances to see if one sample is consistently higher than others:
+```{r, fig.width=7 dpi =300}
+par(mar = c(5,4,2,1))  # standard margins
+boxplot(log10(assays(dds)[["cooks"]]), range=0, las=2)
+```
+
+##Gene counts
+```{r, fig.width=10, dpi = 500}
+topGene <- rownames(res)[which.min(res$padj)]
+plotCounts(dds, gene=topGene, intgroup=c("condition"))
+```
+
+## MA Plot 
+```{r, fig.width=6, dpi = 500}
+plotMA(res, ylim=c(-5,5))
+```
+
+## Dispersion estimate 
+```{r, fig.width=6, fig.height=6, dpi =500}
+plotDispEsts(dds) 
+```
+
+## P-value histogram
+Excludes gene values with very small counts.
+```{r,fig.width=5,  dpi = 500}
+hist(res$pvalue[res$baseMean > 1], breaks=20, col="grey50", border="white")
+```
+
+## Genes with the top variance
+```{r , fig.width = 3, fig.height = 6, dpi = 500}
+number_of_genes = 10
+
+topVarGenes <- head(order(-rowVars(assay(rld))), number_of_genes)
+mat <- assay(rld)[ topVarGenes, ]
+mat <- mat - rowMeans(mat)
+rownames(df) <- colnames(mat)
+
+heatmap <- pheatmap(mat, 
+         annotation_col=df,   
+         cluster_rows = FALSE,
+         annotation_colors = ann_colors,
+         fontsize = 6)
+```
+
+## Sample variance with the top number of Log2FC Genes
+```{r , fig.width = 3, fig.height = 6, dpi = 500}
+number_of_genes = 20
+
+#Get the top N number of genes according to Log2FC, and add a "*" to those that are significant (padj < .05)
+results_top <- res %>% as.data.frame %>% tibble::rownames_to_column(var = "gene") %>% 
+  mutate(gene_star = if_else(padj < .05, paste0(gene, "*"), gene)) %>%
+  mutate(abs_L2FC = abs(log2FoldChange)) %>%
+  dplyr::arrange(desc(abs_L2FC)) 
+results_top <- results_top[1:number_of_genes,]
+top_genes <- unlist(results_top$gene_star) 
+
+# Filter the data choosing only genes whose variances are in the top Log2FC Genes
+df_by_gene <- data.frame(assay(rld))
+names(df_by_gene) <- gsub(x = names(df_by_gene), pattern = "\\.", replacement = "-")  #For some reason the names get changed to "Control.1" when you conver to a df, so you have to sub in a "-" for the "."
+df_by_gene <- rownames_to_column(df_by_gene, var="gene")
+df_by_gene <- inner_join(df_by_gene,results_top, by="gene" ) 
+df_by_gene <- dplyr::arrange(df_by_gene, desc(abs_L2FC))
+df_by_gene_plot <- df_by_gene %>% dplyr::select(-c("gene", "baseMean", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj", "abs_L2FC")) %>% relocate("gene_star") %>% remove_rownames %>% column_to_rownames(var="gene_star") %>% as.matrix()
+
+df_by_gene_plot_means <- df_by_gene_plot - rowMeans(df_by_gene_plot)
+
+heatmap <- pheatmap(df_by_gene_plot_means, 
+          annotation_col=df,          
+         cluster_rows = FALSE, # Don't cluster the rows of the heatmap (genes in this case)
+         clustering_distance_cols= sampleDists,
+         annotation_colors = ann_colors,
+         main="* indicates padj < .05", 
+         fontsize = 6) 
+
+heatmap
+```
+
+
+
+# Run DESeq2 vs Control
+
+# Define function to run DESeq2 on each condition
+```{r}
+
+run_deseq <- function(test_condition) {
+  keep <- colData$condition %in% c("Control", test_condition)
+  count_subset <- countData[, keep]
+  col_subset <- colData[keep, , drop = FALSE]
+  col_subset$condition <- factor(col_subset$condition, levels = c("Control", test_condition))
+
+  dds <- DESeqDataSetFromMatrix(count_subset, col_subset, design = ~condition)
+  dds <- DESeq(dds)
+  rld <- rlog(dds)
+  res <- results(dds, contrast = c("condition", test_condition, "Control"))
+
+  res_df <- as.data.frame(res)
+  assign(paste0(test_condition, "_res"), res_df, .GlobalEnv)
+  resSig <- subset(res_df, padj < 0.05)
+  assign(paste0(test_condition, "_resSig"), resSig, .GlobalEnv)
+
+  hist(res$pvalue[res$baseMean > 1], breaks = 20, col = "grey50", border = "white",
+       main = paste0(test_condition, " – p-value distribution"))
+
+  topN <- 20
+  res_tbl <- tibble::rownames_to_column(res_df, var = "gene") %>%
+    mutate(gene_star = if_else(padj < .05, paste0(gene, "*"), gene),
+           absLFC = abs(log2FoldChange)) %>%
+    arrange(desc(absLFC)) %>%
+    slice_head(n = topN)
+
+  expr_mat <- assay(rld)[res_tbl$gene, , drop = FALSE]
+  rownames(expr_mat) <- res_tbl$gene_star
+  expr_mat <- expr_mat - rowMeans(expr_mat)
+
+  ann_df <- as.data.frame(colData(rld))[, c("condition", "origin")]
+  heat <- pheatmap(expr_mat,
+                   annotation_col = ann_df,
+                   cluster_rows = FALSE,
+                   main = paste0(test_condition, " – top ", topN, " |log2FC| genes (* = padj<0.05)"),
+                   fontsize = 6)
+  print(heat)
+
+  Vol <- EnhancedVolcano(res,
+                         lab = rownames(res),
+                         x = "log2FoldChange",
+                         y = "padj",
+                         title = paste0(test_condition, " vs Control"),
+                         subtitle = "padj<0.05, |FC|>2",
+                         pCutoff = 0.05,
+                         FCcutoff = 2,
+                         labSize = 1,
+                         pointSize = 1,
+                         legendPosition = "bottom")
+  print(Vol)
+
+  invisible(list(dds = dds, rld = rld, res = res))
+}
+
+```
+
+
+# Define function to run GSEA
+```{r}
+
+run_gsea <- function(test_condition) {
+  # 1. Load DESeq2 results
+  res_df <- get(paste0(test_condition, "_res"))
+  res_df$SYMBOL <- rownames(res_df)
+  res_df <- res_df[!is.na(res_df$log2FoldChange), ]
+
+  # 2. Prepare ranked gene list
+  gene_list <- res_df$log2FoldChange
+  names(gene_list) <- res_df$SYMBOL
+  gene_list <- sort(gene_list, decreasing = TRUE)
+
+  # 3. Combine selected Hallmark gene sets
+  # selected_gmts <- c(
+  #   "HALLMARK_APOPTOSIS.v2025.1.Hs.gmt",
+  #   "HALLMARK_DNA_REPAIR.v2025.1.Hs.gmt",
+  #   "HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION.v2025.1.Hs.gmt",
+  #   "HALLMARK_MYC_TARGETS_V2.v2025.1.Hs.gmt",
+  #   "HALLMARK_P53_PATHWAY.v2025.1.Hs.gmt",
+  #   "HALLMARK_WNT_BETA_CATENIN_SIGNALING.v2025.1.Hs.gmt"
+  # )
+  # 
+  # combined_gmt <- purrr::map_dfr(selected_gmts, ~ read.gmt(file.path("../Hallmark_pathways", .x)))
+
+  combined_gmt <- read.gmt("../Hallmark_pathways/h.all.v2025.1.Hs.symbols.gmt")
+  
+  # 4. Run GSEA on combined hallmark gene sets
+  gsea_res <- GSEA(geneList = gene_list,
+                   TERM2GENE = combined_gmt,
+                   pvalueCutoff = 1,
+                   verbose = FALSE)
+
+  # 5. Save to global environment
+  assign(paste0(test_condition, "_HALLMARK_GSEA"), gsea_res, envir = .GlobalEnv)
+
+  # 6. Plot compact dotplot
+  dot <- dotplot(gsea_res,
+                 showCategory = 12,
+                 title = paste0(test_condition, " Hallmarks")) +
+    theme_bw(base_size = 12) 
+
+  print(dot)
+  
+  #Ridgeplot
+  ridge <- ridgeplot(gsea_res, showCategory = 12) +
+    ggtitle(paste0(test_condition, " Hallmarks")) +
+    theme_bw(base_size = 12)
+    print(ridge)
+    
+  invisible(list(gsea = gsea_res, dotplot = dot, ridgeplot = ridge))
+}
+
+```
+
+
+# Run the functions!
+```{r}
+conditions <- unique(colData$condition)
+conditions <- conditions[conditions != "Control"] 
+
+
+library(GSEABase)
+
+for (condition in conditions){
+  run_deseq(condition)  
+  run_gsea(condition)   
+}
+```
+
+
+# Compare all significant DESeq2 results
+```{r}
+merge_resSig_logFC <- function(conditions) {
+  merged_df <- NULL
+  
+  for (cond in conditions) {
+    # Construct variable name and get resSig
+    var_name <- paste0(cond, "_resSig")
+    
+    if (exists(var_name)) {
+      resSig <- get(var_name)
+      
+      # Convert to data.frame if it's not already
+      resSig <- as.data.frame(resSig)
+      
+      # Ensure gene names are rownames
+      resSig$gene <- rownames(resSig)
+      
+      # Extract log2FoldChange and rename column
+      df <- resSig[, c("gene", "log2FoldChange")]
+      colnames(df)[2] <- cond
+      
+      # Merge into final table
+      if (is.null(merged_df)) {
+        merged_df <- df
+      } else {
+        merged_df <- merge(merged_df, df, by = "gene", all = TRUE)
+      }
+    } else {
+      warning(paste("No significant results for condition:", cond))
+    }
+  }
+  
+  # Set gene as rownames
+  rownames(merged_df) <- merged_df$gene
+  merged_df$gene <- NULL
+  
+  return(merged_df)
+}
+
+logfc_merged <- merge_resSig_logFC(conditions)
+write.csv(logfc_merged, row.names = TRUE, file=paste0("logfc_merged_DeSeq2_DEGS.csv"))
+
+```
+
+
+# Create a ven diagram of all the overlapping genes 
+This is alittle choatic so I don't find it helpful.
+```{r}
+# Convert all to numeric, if not already
+df <- mutate_all(logfc_merged, ~as.numeric(as.character(.)))
+
+# Create sets: which genes have non-NA values in each condition
+Fna_ATCC_genes <- rownames(df)[!is.na(df$Fna_ATCC)]
+Fna_WT_genes   <- rownames(df)[!is.na(df$Fna_WT)]
+Fnn_ATCC_genes <- rownames(df)[!is.na(df$Fnn_ATCC)]
+Fnp_WT_genes   <- rownames(df)[!is.na(df$Fnp_WT)]
+
+# Plot Venn diagram
+venn.plot <- venn.diagram(
+  x = list(
+    Fna_ATCC = Fna_ATCC_genes,
+    Fna_WT = Fna_WT_genes,
+    Fnn_ATCC = Fnn_ATCC_genes,
+    Fnp_WT = Fnp_WT_genes
+  ),
+  filename = NULL,
+  fill = c("red", "blue", "green", "purple"),
+  alpha = 0.5,
+  cat.cex = 1.2,
+  cex = 1.5,
+  main = "Overlap of Expressed Genes"
+)
+
+# Save to file or display
+grid::grid.newpage()
+grid::grid.draw(venn.plot)
+```
+
+
+# Combine all the gsea results and clean up
+```{r, fig.height=8, fig.width=9}
+
+# Define significance threshold (adjust as needed)
+sig_threshold <- 0.25
+NES_threshold <- .5
+
+# Create a named list of GSEA results as data frames
+gsea_dfs <- lapply(conditions, function(cond) {
+  df <- as.data.frame(get(paste0(cond, "_HALLMARK_GSEA")))
+  df$Condition <- cond
+  return(df)
+})
+
+# Combine them
+combined_gsea <- bind_rows(gsea_dfs)
+
+combined_gsea_filt <- combined_gsea %>% filter(p.adjust < sig_threshold & NES > NES_threshold) %>% dplyr::select(c("Description", "NES", "p.adjust", "Condition")) %>%
+  mutate(
+    Description_clean = str_remove(Description, "^HALLMARK_") %>%      # remove prefix
+                     str_replace_all("_", " ")
+  ) %>% dplyr::select(-c("Description"))
+
+
+ggplot(combined_gsea_filt, aes(x = NES, y = Description_clean, color = Condition, size = -log10(p.adjust))) +
+  geom_point(alpha = 0.8) +
+  scale_size_continuous(name = "-log10(adj. p-value)", range = c(1, 8)) +
+  labs(
+    title = "Pathway Enrichment Across Conditions",
+    x = "Normalized Enrichment Score (NES)",
+    y = "Hallmark Pathway"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    axis.text.y = element_text(size = 8),
+    legend.position = "right"
+  ) +
+  scale_color_manual(values=colors) 
+
+unique_to_fna_wt <- combined_gsea_filt %>%
+  group_by(Description_clean) %>%
+  filter(all(Condition == "Fna_WT")) %>%
+  distinct(Description_clean) %>%
+  pull(Description_clean)
+
+```
+
+# Plot selected pathways
+```{r, fig.height=2, fig.width=7}
+selected_pathways <- c("EPITHELIAL MESENCHYMAL TRANSITION", "TNFA SIGNALING VIA NFKB", "KRAS SIGNALING UP", "HYPOXIA" )
+
+replacements <- c(
+  "Tnfa Signaling Via Nfkb" = "TNF Signaling via NFKB",
+  "Kras Signaling Up" = "KRAS Signaling Up"
+)
+
+combined_gsea_filt %>% filter(Description_clean %in% selected_pathways) %>%
+  mutate(Description_clean = str_to_title(Description_clean))%>%
+    mutate(Description_clean = recode(Description_clean, !!!replacements))%>%
+    ggplot(., aes(x = NES, y = Description_clean, color = Condition)) +
+      geom_point(alpha = 0.8, size=5) +
+      labs(
+        title = "Selected Cancer Hallmark Pathway Enrichment",
+        x = "Normalized Enrichment Score",
+        y = ""
+      ) +
+      theme_bw(base_size = 12) +
+      theme(
+        axis.text.y = element_text(size = 12),
+        legend.position = "right"
+      ) +
+      scale_color_manual(values=colors) 
+```
+
+
+# Plot the count of enriched pathways by condition
+```{r, fig.width=3, fig.height=2}
+# Count enriched pathways per condition
+enriched_counts <- combined_gsea %>%
+  filter(p.adjust < sig_threshold) %>%
+  group_by(Condition) %>%
+  summarise(n_enriched = n())
+
+
+ggplot(enriched_counts, aes(x = reorder(Condition, n_enriched), y = n_enriched, fill = Condition)) +
+  geom_col() +
+  labs(
+    title = "Number of GSEA Pathways",
+    x = "",
+    y = "Count of Pathways"
+  ) +
+  
+      coord_flip() + 
+  theme_bw(base_size = 12) +
+    theme(
+    legend.position = "none")+
+  scale_fill_manual(values=colors) 
+
+ggsave("gsea_pathway_count.png", width = 3, height = 2, units = "in")
+
+
+```
+
+
+#Selected Fna genes
+```{r, fig.width=2, fig.height=1.5}
+selected_genes <- c("CXCL8","S100A9", "AKT1", "JUN", "TBX3")
+Fna_WT_selected_genes <- Fna_WT_res[rownames(Fna_WT_res) %in% selected_genes, , drop = FALSE]
+Fna_WT_selected_genes <- Fna_WT_selected_genes %>% rownames_to_column(var="gene")
+
+theme_bw_small <- function(base_size = 14, axis_title_size = 12) {
+  theme_bw(base_size = base_size) +
+    theme(axis.title.x = element_text(size = axis_title_size),
+          axis.title.y = element_text(size = axis_title_size))
+}
+
+ggplot(Fna_WT_selected_genes, aes(x = reorder(gene, -log2FoldChange),  # order left→right by LFC
+               y = log2FoldChange)) +
+  geom_col(fill = "dodgerblue") +
+  geom_errorbar(aes(ymin = log2FoldChange - lfcSE,
+                    ymax = log2FoldChange + lfcSE),
+                width = 0.3, colour = "black") +
+    coord_flip() +                                # horizontal bars (optional)
+  labs(x = NULL, y = "log2 fold change")+
+  theme(
+    axis.text.y  = element_text(size = 10),  # tick labels
+    axis.text.x  = element_text(size = 12),
+    axis.title.y = element_text(size = 14),  # axis titles
+    axis.title.x = element_text(size = 14)
+  ) + 
+  theme_bw_small()
+
+ggsave("Fna_WT_genes.png", width = 2, height = 1.50  , units = "in")
+
+```
+
+
